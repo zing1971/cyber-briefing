@@ -151,9 +151,9 @@ def generate_briefing(news_context, retries=2):
 
     for attempt in range(retries):
         try:
-            print(f"[{TODAY}] 正在呼叫 Claude API (claude-3-5-haiku-latest)...")
+            print(f"[{TODAY}] 正在呼叫 Claude API (claude-haiku-4-5-20251001)...")
             response = client.messages.create(
-                model="claude-3-5-haiku-latest",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=4096,
                 system=system_prompt,
                 tools=tools,
