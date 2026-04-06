@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-資安情報每日自動日報 - GitHub Actions 版本 (全盤優化版)
+資安情報每日自動日報 - GitHub Actions 版本 (全盤優化版 V2)
 特點：
-1. OSINT 資訊蒐集 (RSS Feed Parsing) 以減少幻覺
-2. Anthropic Tool Use (Function Calling) 強制穩定輸出 JSON Schema
-3. 新增獨立欄位：台灣影響評估
-4. 原生 Notion Blocks API 排版，避免長字串硬切斷導致破版
+1. 擴大資料庫：增加 CISA, Dark Reading 等全球權威來源
+2. 時效限制：嚴格過濾 24 小時內的新聞
+3. URL 追溯：抓取原文連結並強制 LLM 提供，寫入 Notion 時轉為藍字超連結
 """
 import os
 import json
 import datetime
+import calendar
 import time
 import requests
 import feedparser
@@ -27,30 +27,53 @@ TODAY_DISPLAY = _now_taipei.strftime("%Y年%m月%d日")
 # 模組 1: OSINT 資訊蒐集 (RSS Feed Parsing)
 # ==========================================
 def fetch_rss_news():
-    print(f"[{TODAY}] 正在抓取最新 RSS 資安新聞...")
+    print(f"[{TODAY}] 正在抓取過去 24 小時內的最新 RSS 資安新聞...")
     feeds = [
+        {"name": "CISA Alerts", "url": "https://www.cisa.gov/cybersecurity-advisories/all.xml"},
         {"name": "iThome 資安", "url": "https://www.ithome.com.tw/rss/security"},
         {"name": "The Hacker News", "url": "https://feeds.feedburner.com/TheHackersNews"},
-        {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/"}
+        {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/"},
+        {"name": "Dark Reading", "url": "https://www.darkreading.com/rss.xml"},
+        {"name": "SecurityWeek", "url": "https://www.securityweek.com/feed/"},
+        {"name": "CyberScoop", "url": "https://cyberscoop.com/feed/"},
+        {"name": "SANS ISC", "url": "https://isc.sans.edu/rssfeed.xml"}
     ]
     
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    twenty_four_hours_ago = now_utc - datetime.timedelta(hours=24)
+    
     news_items = []
+    
     for f in feeds:
         try:
             parsed = feedparser.parse(f["url"])
             count = 0
             for entry in parsed.entries:
-                # 簡單過濾：只取發布時間在 48 小時內的新聞 (簡易判斷: 假設 RSS 都是照新舊排，取前 5 筆)
-                if count >= 5: break
-                title = entry.get("title", "")
-                summary = entry.get("summary", "")[:200]  # 截斷摘要避免過長
-                news_items.append(f"【{f['name']}】: {title}\n摘要: {summary}")
-                count += 1
+                # 若能成功解析發布時間，則檢查是否在 24 小時內
+                include_entry = False
+                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                    entry_time = datetime.datetime.fromtimestamp(calendar.timegm(entry.published_parsed), datetime.timezone.utc)
+                    if entry_time >= twenty_four_hours_ago:
+                        include_entry = True
+                else:
+                    # 如果 RSS 沒有時間標籤，則預設取前 2 篇避免資料量過大
+                    if count < 2:
+                        include_entry = True
+                
+                if include_entry:
+                    title = entry.get("title", "")
+                    link = entry.get("link", "")
+                    summary = entry.get("summary", "")[:200]
+                    news_items.append(f"【{f['name']}】: {title}\nURL: {link}\n摘要: {summary}")
+                    count += 1
+                
+                if count >= 8: # 每來源最多取 8 篇，保護 LLM Token 數
+                    break
         except Exception as e:
             print(f"抓取 {f['name']} 失敗: {e}")
 
     context = "\n\n".join(news_items)
-    print(f"[{TODAY}] 抓取完成，共 {len(news_items)} 篇參考新聞。")
+    print(f"[{TODAY}] 抓取完成，共 {len(news_items)} 篇有效參考新聞。")
     return context
 
 # ==========================================
@@ -60,9 +83,12 @@ def generate_briefing(news_context, retries=2):
     print(f"[{TODAY}] 呼叫 Anthropic API 產生格式化報告...")
     
     system_prompt = f"""你是台灣政府機關的頂級資安威脅情報分析師。
-今天是 {TODAY_DISPLAY}。你將收到今日最新的全球資安新聞（由 RSS 抓取）。
+今天是 {TODAY_DISPLAY}。你將收到過去 24 小時最新的全球資安新聞（由 RSS 抓取，附帶原始 URL）。
 請根據這些真實新聞進行分析、摘要、過濾，並填入規定的格式中輸出。
-如果新聞中提及重大漏洞 (CVE)、已遂利用情形、或是與台灣基礎設施及政府機關有關的威脅（例如 APT 攻擊、網釣攻擊、勒索軟體），請特別突顯並放入影響評估中。如果你覺得需要補充你的專業知識，請合併說明，但切勿瞎掰沒有發生的事件。"""
+要求：
+1. 重大漏洞 (CVE)、已遂利用情形、或是與台灣基礎設施有關的威脅請優先列入。
+2. 切勿瞎掰沒有發生的事件或無中生有。
+3. 務必從提供的內容中提取對應的真實 URL 作為來源連結 (`source_url` 與 `reference_url`)，如果真的沒有就留空。"""
 
     tools = [
         {
@@ -83,7 +109,8 @@ def generate_briefing(news_context, retries=2):
                                 "severity": {"type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]},
                                 "cve": {"type": "string", "description": "相關 CVE，若無填 null"},
                                 "cisa_kev_listed": {"type": "boolean", "description": "是否被 CISA KEV 列管為已遭利用漏洞"},
-                                "source": {"type": "string", "description": "資訊來源(可填報紙或機構名稱)"}
+                                "source": {"type": "string", "description": "資訊來源媒體"},
+                                "source_url": {"type": "string", "description": "對應的新聞原始 URL 連結"}
                             },
                             "required": ["title", "description", "severity", "cisa_kev_listed"]
                         }
@@ -97,7 +124,8 @@ def generate_briefing(news_context, retries=2):
                                 "component": {"type": "string", "description": "受影響元件/軟體"},
                                 "cvss": {"type": "string", "description": "評分，如 9.8"},
                                 "type": {"type": "string", "description": "類型，如 RCE, XSS"},
-                                "status": {"type": "string", "description": "如 '已遭利用' 或 '尚未修補' 等"}
+                                "status": {"type": "string", "description": "如 '已遭利用' 或 '尚未修補' 等"},
+                                "reference_url": {"type": "string", "description": "有關此漏洞的參考連結"}
                             },
                             "required": ["id", "component", "cvss", "type", "status"]
                         }
@@ -149,8 +177,16 @@ def generate_briefing(news_context, retries=2):
             
             raise ValueError("API 未回傳預期的 tool_use 內容。")
             
-        except Exception as e:
+        except requests.exceptions.HTTPError as e:
             print(f"[{TODAY}] 第 {attempt+1} 次 API 呼叫/解析失敗: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"詳細錯誤: {e.response.text}")
+            if attempt < retries - 1:
+                time.sleep(3)
+            else:
+                raise
+        except Exception as e:
+            print(f"[{TODAY}] 第 {attempt+1} 次錯誤: {e}")
             if attempt < retries - 1:
                 time.sleep(3)
             else:
@@ -189,15 +225,32 @@ def create_paragraph(text, color="default"):
         }
     }
 
-def create_bullet_item(text):
+def create_custom_bullet_item(rich_text_array):
+    """
+    rich_text_array 為 dict 陣列，例如: 
+    [{"text": {"content": "文字", "link": {"url": "https..."}}}]
+    """
+    # 確保格式正確符合 Notion API
+    formatted_array = []
+    for rt in rich_text_array:
+        item = {"type": "text", "text": {"content": rt.get("content", "")}}
+        if rt.get("url"):
+            item["text"]["link"] = {"url": rt.get("url")}
+        if rt.get("bold"):
+            item["annotations"] = {"bold": True}
+        formatted_array.append(item)
+
     return {
         "object": "block",
         "type": "bulleted_list_item",
-        "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": text}}]}
+        "bulleted_list_item": {"rich_text": formatted_array}
     }
 
-def create_table(headers, rows):
-    # Table block
+def create_table(headers, rows_dict):
+    """
+    rows_dict 為列表的列表，格式舉例:
+    [ [ {"content": "Id", "url": "https..."} , ... ] ]
+    """
     tb = {
         "object": "block",
         "type": "table",
@@ -209,17 +262,19 @@ def create_table(headers, rows):
         }
     }
     
-    def make_row(cells):
-        return {
-            "type": "table_row",
-            "table_row": {
-                "cells": [[{"type": "text", "text": {"content": str(cell)}}] for cell in cells]
-            }
-        }
+    # Header row (純文字)
+    header_cells = [[{"type": "text", "text": {"content": str(cell)}}] for cell in headers]
+    tb["table"]["children"].append({"type": "table_row", "table_row": {"cells": header_cells}})
     
-    tb["table"]["children"].append(make_row(headers))
-    for r in rows:
-        tb["table"]["children"].append(make_row(r))
+    # Data rows (可以包含 href/URL)
+    for row in rows_dict:
+        cells = []
+        for cell in row:
+            txt_obj = {"type": "text", "text": {"content": str(cell.get("content", ""))}}
+            if cell.get("url"):
+                txt_obj["text"]["link"] = {"url": cell.get("url")}
+            cells.append([txt_obj])
+        tb["table"]["children"].append({"type": "table_row", "table_row": {"cells": cells}})
         
     return tb
 
@@ -247,14 +302,30 @@ def create_child_page(briefing):
     events = briefing.get("events", [])
     if events:
         for e in events:
-            text = f"{severity_emoji(e.get('severity',''))} {e.get('title','')} \n{e.get('description','')}"
+            # 建立 Rich Text 陣列
+            rt = []
+            
+            # 第一段：Emoji + 標題 (檢查有沒有超連結)
+            title_text = f"{severity_emoji(e.get('severity',''))} {e.get('title','')} "
+            rt.append({"content": title_text, "bold": True, "url": e.get("source_url")})
+            
+            # 第二段：描述
+            desc_text = f"\n{e.get('description','')} "
+            rt.append({"content": desc_text})
+            
+            # 第三段：警告標籤或來源
+            meta_text = ""
             if e.get("cisa_kev_listed"):
-                text += " [⚠️ 列入 CISA KEV 已被利用]"
+                meta_text += "[⚠️ 列入 CISA KEV 已被利用] "
             if e.get("cve"):
-                text += f" (CVE: {e.get('cve')})"
+                meta_text += f"(CVE: {e.get('cve')}) "
             if e.get("source"):
-                text += f" - 來源:{e.get('source')}"
-            blocks.append(create_bullet_item(text))
+                meta_text += f"來源:{e.get('source')} "
+                
+            if meta_text:
+                rt.append({"content": meta_text})
+            
+            blocks.append(create_custom_bullet_item(rt))
     else:
         blocks.append(create_paragraph("(無重大事件)"))
         
@@ -265,10 +336,20 @@ def create_child_page(briefing):
     cves = briefing.get("cves", [])
     if cves:
         headers = ["CVE編號", "元件", "CVSS", "類型", "狀態"]
-        rows = [
-            [c.get("id",""), c.get("component",""), c.get("cvss",""), c.get("type",""), c.get("status","")] 
-            for c in cves
-        ]
+        rows = []
+        for c in cves:
+            # 第一欄 ID 加上 URL 超連結
+            id_cell = {"content": c.get("id","")}
+            if c.get("reference_url"):
+                id_cell["url"] = c.get("reference_url")
+                
+            rows.append([
+                id_cell,
+                {"content": c.get("component","")},
+                {"content": c.get("cvss","")},
+                {"content": c.get("type","")},
+                {"content": c.get("status","")}
+            ])
         blocks.append(create_table(headers, rows))
     else:
         blocks.append(create_paragraph("(無高危 CVE)"))
@@ -280,12 +361,13 @@ def create_child_page(briefing):
     actions = briefing.get("action_items", [])
     if actions:
         for a in actions:
-            blocks.append(create_bullet_item(a))
+            # 沿用稍早建立的 Custom bullet，但這只有單純的文字
+            blocks.append(create_custom_bullet_item([{"content": a}]))
     else:
         blocks.append(create_paragraph("(無特殊建議)"))
 
     blocks.append({"object": "block", "type": "divider", "divider": {}})
-    blocks.append(create_paragraph(f"自動產出：{TODAY} 07:00 台北 | GitHub Actions & Claude-3.5-Sonnet (加入RSS來源)", color="gray"))
+    blocks.append(create_paragraph(f"自動產出：{TODAY} 07:00 台北 | GitHub Actions & Claude-Sonnet", color="gray"))
 
     # 送出建立請求
     parent_data = {
@@ -307,7 +389,6 @@ def create_child_page(briefing):
 def append_table_row(briefing, child_url):
     print(f"[{TODAY}] 更新 Notion 主頁表格...")
     
-    # 嘗試取得主頁面子區塊的 Table
     resp = requests.get(f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children?page_size=50", headers=notion_headers())
     blocks = resp.json().get("results", [])
     table = next((b for b in blocks if b["type"] == "table"), None)
@@ -345,7 +426,6 @@ def main():
     print(f"  資安日報 {TODAY} 07:00 台北")
     print(f"{'='*50}\n")
     
-    # 執行流程
     news_context = fetch_rss_news()
     briefing = generate_briefing(news_context)
     
