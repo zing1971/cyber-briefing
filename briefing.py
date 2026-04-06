@@ -13,6 +13,7 @@ import calendar
 import time
 import requests
 import feedparser
+import anthropic
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 NOTION_TOKEN      = os.environ.get("NOTION_TOKEN", "")
@@ -146,43 +147,34 @@ def generate_briefing(news_context, retries=2):
         }
     ]
 
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
-    }
-    
-    payload = {
-        "model": "claude-3-haiku-20240307",
-        "max_tokens": 4096,
-        "system": system_prompt,
-        "tools": tools,
-        "tool_choice": {"type": "tool", "name": "generate_daily_briefing"},
-        "messages": [
-            {
-                "role": "user", 
-                "content": f"以下是今日抓取到的資安新聞摘要，請呼叫 generate_daily_briefing 工具來產出 {TODAY_DISPLAY} 日報：\n\n<news>\n{news_context}\n</news>"
-            }
-        ]
-    }
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     for attempt in range(retries):
         try:
-            resp = requests.post("https://api.anthropic.com/v1/messages", json=payload, headers=headers, timeout=120)
-            resp.raise_for_status()
-            data = resp.json()
-            
-            for content in data.get("content", []):
-                if content.get("type") == "tool_use" and content.get("name") == "generate_daily_briefing":
+            print(f"[{TODAY}] 正在呼叫 Claude API (claude-3-5-haiku-latest)...")
+            response = client.messages.create(
+                model="claude-3-5-haiku-latest",
+                max_tokens=4096,
+                system=system_prompt,
+                tools=tools,
+                tool_choice={"type": "tool", "name": "generate_daily_briefing"},
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"以下是今日抓取到的資安新聞摘要，請呼叫 generate_daily_briefing 工具來產出 {TODAY_DISPLAY} 日報：\n\n<news>\n{news_context}\n</news>"
+                    }
+                ]
+            )
+
+            for block in response.content:
+                if block.type == "tool_use" and block.name == "generate_daily_briefing":
                     print(f"[{TODAY}] 解析成功！")
-                    return content.get("input", {})
-            
+                    return block.input
+
             raise ValueError("API 未回傳預期的 tool_use 內容。")
-            
-        except requests.exceptions.HTTPError as e:
-            print(f"[{TODAY}] 第 {attempt+1} 次 API 呼叫/解析失敗: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                print(f"詳細錯誤: {e.response.text}")
+
+        except anthropic.APIStatusError as e:
+            print(f"[{TODAY}] 第 {attempt+1} 次 API 呼叫失敗 (HTTP {e.status_code}): {e.message}")
             if attempt < retries - 1:
                 time.sleep(3)
             else:
