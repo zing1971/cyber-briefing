@@ -17,6 +17,8 @@ import feedparser
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 NOTION_TOKEN      = os.environ.get("NOTION_TOKEN", "")
 NOTION_PAGE_ID    = os.environ.get("NOTION_PAGE_ID", "33457ac64d74818881f2c131ecc5dbff")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 _tz_taipei = datetime.timezone(datetime.timedelta(hours=8))
 _now_taipei = datetime.datetime.now(tz=_tz_taipei)
@@ -151,7 +153,7 @@ def generate_briefing(news_context, retries=2):
     }
     
     payload = {
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-3-5-haiku-20241022",
         "max_tokens": 4096,
         "system": system_prompt,
         "tools": tools,
@@ -421,6 +423,60 @@ def append_table_row(briefing, child_url):
     else:
         print(f"[ERROR] 更新表格失敗: {patch_resp.text}")
 
+def send_telegram_message(briefing, notion_url):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[{TODAY}] 未設定 Telegram Token 或 Chat ID，略過 Telegram 通知。")
+        return
+        
+    print(f"[{TODAY}] 準備發送 Telegram 通知...")
+    
+    # 建構訊息內容
+    sev = severity_emoji(briefing.get('severity', ''))
+    summary = briefing.get('summary', '')
+    impact = briefing.get('taiwan_impact_assessment', '')
+    events = briefing.get('events', [])
+    
+    msg = f"🛡️ <b>資安威脅日報 ({TODAY})</b>\n\n"
+    msg += f"<b>{sev} 核心摘要:</b>\n{summary}\n\n"
+    
+    if impact:
+        msg += f"<b>🇹🇼 台灣影響評估:</b>\n{impact}\n\n"
+        
+    if events:
+        msg += "<b>🚨 今日重大事件:</b>\n"
+        for i, e in enumerate(events[:3]): # 取前三則
+            src_url = e.get('source_url', '')
+            title = e.get('title', '')
+            title_html = f"<a href='{src_url}'>{title}</a>" if src_url else title
+            msg += f"• {severity_emoji(e.get('severity',''))} {title_html}\n"
+    
+    if notion_url:
+        msg += f"\n📂 <b>查看完整報告：</b>\n<a href='{notion_url}'>點擊前往 Notion</a>"
+        
+    # 發送請求
+    tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    
+    # 參考 ai-secretary，自動切割超過 4096 字元的長訊息
+    MAX_LEN = 4000 # 留點 buffer
+    chunks = [msg[i:i + MAX_LEN] for i in range(0, len(msg), MAX_LEN)]
+    
+    for idx, chunk in enumerate(chunks):
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": chunk,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        
+        try:
+            resp = requests.post(tg_url, json=payload, timeout=20)
+            resp.raise_for_status()
+            print(f"[{TODAY}] ✅ Telegram 發送成功 (段落 {idx+1}/{len(chunks)})")
+        except Exception as e:
+            print(f"[ERROR] Telegram 發送失敗 (段落 {idx+1}): {e}")
+            if 'resp' in locals():
+                print(f"詳細錯誤: {resp.text}")
+
 def main():
     print(f"\n{'='*50}")
     print(f"  資安日報 {TODAY} 07:00 台北")
@@ -434,6 +490,9 @@ def main():
     url = create_child_page(briefing)
     if url:
         append_table_row(briefing, url)
+        
+    # 發送 Telegram 通知
+    send_telegram_message(briefing, url)
         
     print(f"\n✅ 流程全部完成!")
 
