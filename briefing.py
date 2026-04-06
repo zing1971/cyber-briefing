@@ -153,7 +153,7 @@ def generate_briefing(news_context, retries=2):
     }
     
     payload = {
-        "model": "claude-3-5-haiku-20241022",
+        "model": "claude-3-haiku-20240307",
         "max_tokens": 4096,
         "system": system_prompt,
         "tools": tools,
