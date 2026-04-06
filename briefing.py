@@ -15,11 +15,11 @@ import requests
 import feedparser
 import anthropic
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-NOTION_TOKEN      = os.environ.get("NOTION_TOKEN", "")
-NOTION_PAGE_ID    = os.environ.get("NOTION_PAGE_ID", "33457ac64d74818881f2c131ecc5dbff")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+NOTION_TOKEN       = os.environ.get("NOTION_TOKEN", "").strip()
+NOTION_PAGE_ID     = os.environ.get("NOTION_PAGE_ID", "33457ac64d74818881f2c131ecc5dbff").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 _tz_taipei = datetime.timezone(datetime.timedelta(hours=8))
 _now_taipei = datetime.datetime.now(tz=_tz_taipei)
