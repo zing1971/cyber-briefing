@@ -123,7 +123,7 @@ def generate_briefing(news_context, retries=2):
     }
     
     payload = {
-        "model": "claude-3-5-sonnet-20241022",
+        "model": "claude-sonnet-4-20250514",
         "max_tokens": 4096,
         "system": system_prompt,
         "tools": tools,
