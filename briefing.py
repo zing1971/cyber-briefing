@@ -142,6 +142,9 @@ def generate_briefing(news_context, retries=2):
         "required": ["summary", "severity", "events", "cves", "taiwan_impact_assessment", "action_items"]
     }
 
+    if not GEMINI_API_KEY:
+        raise ValueError("環境變數中找不到 GEMINI_API_KEY，請確認 GitHub Secrets 是否有設定。")
+
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     for attempt in range(retries):
