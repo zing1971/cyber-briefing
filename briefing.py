@@ -13,9 +13,10 @@ import calendar
 import time
 import requests
 import feedparser
-import anthropic
+from google import genai
+from google.genai import types
 
-ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "").strip()
 NOTION_TOKEN       = os.environ.get("NOTION_TOKEN", "").strip()
 NOTION_PAGE_ID     = os.environ.get("NOTION_PAGE_ID", "33457ac64d74818881f2c131ecc5dbff").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -83,7 +84,7 @@ def fetch_rss_news():
 # 模組 2: Anthropic API & Tool Use 解析
 # ==========================================
 def generate_briefing(news_context, retries=2):
-    print(f"[{TODAY}] 呼叫 Anthropic API 產生格式化報告...")
+    print(f"[{TODAY}] 呼叫 Gemini API 產生格式化報告...")
     
     system_prompt = f"""你是台灣政府機關的頂級資安威脅情報分析師。
 今天是 {TODAY_DISPLAY}。你將收到過去 24 小時最新的全球資安新聞（由 RSS 抓取，附帶原始 URL）。
@@ -93,92 +94,73 @@ def generate_briefing(news_context, retries=2):
 2. 切勿瞎掰沒有發生的事件或無中生有。
 3. 務必從提供的內容中提取對應的真實 URL 作為來源連結 (`source_url` 與 `reference_url`)，如果真的沒有就留空。"""
 
-    tools = [
-        {
-            "name": "generate_daily_briefing",
-            "description": "產生結構化的資安威脅日報",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "summary": {"type": "string", "description": "摘要（2-3個重要事件綜合描述，繁體中文，100字內）"},
-                    "severity": {"type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"], "description": "今日整體嚴重等級"},
-                    "events": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": {"type": "string", "description": "事件標題"},
-                                "description": {"type": "string", "description": "事件說明 100 字內（繁體中文）"},
-                                "severity": {"type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]},
-                                "cve": {"type": "string", "description": "相關 CVE，若無填 null"},
-                                "cisa_kev_listed": {"type": "boolean", "description": "是否被 CISA KEV 列管為已遭利用漏洞"},
-                                "source": {"type": "string", "description": "資訊來源媒體"},
-                                "source_url": {"type": "string", "description": "對應的新聞原始 URL 連結"}
-                            },
-                            "required": ["title", "description", "severity", "cisa_kev_listed"]
-                        }
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string", "description": "摘要（2-3個重要事件綜合描述，繁體中文，100字內）"},
+            "severity": {"type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"], "description": "今日整體嚴重等級"},
+            "events": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "事件標題"},
+                        "description": {"type": "string", "description": "事件說明 100 字內（繁體中文）"},
+                        "severity": {"type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]},
+                        "cve": {"type": "string", "nullable": True, "description": "相關 CVE，若無填 null"},
+                        "cisa_kev_listed": {"type": "boolean", "description": "是否被 CISA KEV 列管為已遭利用漏洞"},
+                        "source": {"type": "string", "description": "資訊來源媒體"},
+                        "source_url": {"type": "string", "description": "對應的新聞原始 URL 連結"}
                     },
-                    "cves": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "string", "description": "CVE ID，如 CVE-2024-XXXX"},
-                                "component": {"type": "string", "description": "受影響元件/軟體"},
-                                "cvss": {"type": "string", "description": "評分，如 9.8"},
-                                "type": {"type": "string", "description": "類型，如 RCE, XSS"},
-                                "status": {"type": "string", "description": "如 '已遭利用' 或 '尚未修補' 等"},
-                                "reference_url": {"type": "string", "description": "有關此漏洞的參考連結"}
-                            },
-                            "required": ["id", "component", "cvss", "type", "status"]
-                        }
+                    "required": ["title", "description", "severity", "cisa_kev_listed"]
+                }
+            },
+            "cves": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "CVE ID，如 CVE-2024-XXXX"},
+                        "component": {"type": "string", "description": "受影響元件/軟體"},
+                        "cvss": {"type": "string", "description": "評分，如 9.8"},
+                        "type": {"type": "string", "description": "類型，如 RCE, XSS"},
+                        "status": {"type": "string", "description": "如 '已遭利用' 或 '尚未修補' 等"},
+                        "reference_url": {"type": "string", "description": "有關此漏洞的參考連結"}
                     },
-                    "taiwan_impact_assessment": {
-                        "type": "string", 
-                        "description": "針對今日情報對台灣政府機關及企業的在地影響專案評估（繁體中文，約100-200字）"
-                    },
-                    "action_items": {
-                        "type": "array",
-                        "items": {"type": "string", "description": "建議資安團隊採取的防護行動（繁體中文）"}
-                    }
-                },
-                "required": ["summary", "severity", "events", "cves", "taiwan_impact_assessment", "action_items"]
+                    "required": ["id", "component", "cvss", "type", "status"]
+                }
+            },
+            "taiwan_impact_assessment": {
+                "type": "string", 
+                "description": "針對今日情報對台灣政府機關及企業的在地影響專案評估（繁體中文，約100-200字）"
+            },
+            "action_items": {
+                "type": "array",
+                "items": {"type": "string", "description": "建議資安團隊採取的防護行動（繁體中文）"}
             }
-        }
-    ]
+        },
+        "required": ["summary", "severity", "events", "cves", "taiwan_impact_assessment", "action_items"]
+    }
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
     for attempt in range(retries):
         try:
-            print(f"[{TODAY}] 正在呼叫 Claude API (claude-haiku-4-5-20251001)...")
-            response = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=4096,
-                system=system_prompt,
-                tools=tools,
-                tool_choice={"type": "tool", "name": "generate_daily_briefing"},
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"以下是今日抓取到的資安新聞摘要，請呼叫 generate_daily_briefing 工具來產出 {TODAY_DISPLAY} 日報：\n\n<news>\n{news_context}\n</news>"
-                    }
-                ]
+            print(f"[{TODAY}] 正在呼叫 Gemini API (gemini-2.5-flash)...")
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=f"以下是今日抓取到的資安新聞摘要，請產出 {TODAY_DISPLAY} 日報：\n\n<news>\n{news_context}\n</news>",
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    response_schema=response_schema,
+                    temperature=0.2,
+                ),
             )
+            
+            print(f"[{TODAY}] 解析成功！")
+            return json.loads(response.text)
 
-            for block in response.content:
-                if block.type == "tool_use" and block.name == "generate_daily_briefing":
-                    print(f"[{TODAY}] 解析成功！")
-                    return block.input
-
-            raise ValueError("API 未回傳預期的 tool_use 內容。")
-
-        except anthropic.APIStatusError as e:
-            print(f"[{TODAY}] 第 {attempt+1} 次 API 呼叫失敗 (HTTP {e.status_code}): {e.message}")
-            if attempt < retries - 1:
-                time.sleep(3)
-            else:
-                raise
         except Exception as e:
             print(f"[{TODAY}] 第 {attempt+1} 次錯誤: {e}")
             if attempt < retries - 1:
