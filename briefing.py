@@ -40,7 +40,8 @@ def fetch_rss_news():
         {"name": "Dark Reading", "url": "https://www.darkreading.com/rss.xml"},
         {"name": "SecurityWeek", "url": "https://www.securityweek.com/feed/"},
         {"name": "CyberScoop", "url": "https://cyberscoop.com/feed/"},
-        {"name": "SANS ISC", "url": "https://isc.sans.edu/rssfeed.xml"}
+        {"name": "SANS ISC", "url": "https://isc.sans.edu/rssfeed.xml"},
+        {"name": "SC World", "url": "https://www.scworld.com/feed"}
     ]
     
     now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -346,7 +347,7 @@ def create_child_page(briefing):
         blocks.append(create_paragraph("(無特殊建議)"))
 
     blocks.append({"object": "block", "type": "divider", "divider": {}})
-    blocks.append(create_paragraph(f"自動產出：{TODAY} 07:00 台北 | GitHub Actions & Claude-Sonnet", color="gray"))
+    blocks.append(create_paragraph(f"自動產出：{TODAY} 07:00 台北 | GitHub Actions & Gemini 2.5 Flash", color="gray"))
 
     # 送出建立請求
     parent_data = {

@@ -7,6 +7,9 @@ on:
   # 允許手動觸發（測試用）
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   briefing:
     runs-on: ubuntu-latest
